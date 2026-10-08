@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/dispatch.js": {
+      "maxDuration": 30
+    }
+  }
+}
