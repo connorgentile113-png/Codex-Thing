@@ -1,0 +1,66 @@
+name: Codex Firebase Task
+run-name: Codex task ${{ inputs.task_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        required: true
+        type: string
+      model:
+        required: false
+        default: default
+        type: string
+      output_branch:
+        required: true
+        type: string
+      task_id:
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  code:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Codex
+        run: npm install -g @openai/codex
+      - name: Configure credential
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          if [ -z "$CODEX_AUTH_JSON" ]; then echo "Missing CODEX_AUTH_JSON secret"; exit 1; fi
+          mkdir -p "$HOME/.codex"
+          chmod 700 "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
+          chmod 600 "$HOME/.codex/auth.json"
+      - name: Prepare branch
+        env:
+          OUT_BRANCH: ${{ inputs.output_branch }}
+        run: git switch -c "$OUT_BRANCH"
+      - name: Execute Codex
+        shell: bash
+        env:
+          TASK_PROMPT: ${{ inputs.prompt }}
+          TASK_MODEL: ${{ inputs.model }}
+        run: |
+          set -o pipefail
+          if [ "$TASK_MODEL" = default ]; then
+            codex exec --full-auto "$TASK_PROMPT" --json | tee "$RUNNER_TEMP/codex-events.jsonl"
+          else
+            codex exec --full-auto --model "$TASK_MODEL" "$TASK_PROMPT" --json | tee "$RUNNER_TEMP/codex-events.jsonl"
+          fi
+      - name: Commit and push
+        env:
+          OUT_BRANCH: ${{ inputs.output_branch }}
+        run: |
+          git config user.name 'Codex Runner'
+          git config user.email 'codex-runner@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then echo 'No changes'; exit 0; fi
+          git commit -m 'Apply Codex task changes'
+          git push origin "$OUT_BRANCH"
