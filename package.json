@@ -1,0 +1,17 @@
+{
+  "name": "codex-firebase-control",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "deploy:firebase": "firebase deploy --only hosting,functions,firestore:rules",
+    "deploy:vercel": "vercel --prod"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  },
+  "devDependencies": {
+    "firebase-tools": "^14.0.0",
+    "vercel": "^48.0.0"
+  }
+}
