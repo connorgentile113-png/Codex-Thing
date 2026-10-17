@@ -1,29 +1,47 @@
 # Forge Cloud
 
-An independent, self-hosted Codex-style coding workspace. Cloudflare Workers runs the dashboard and agent, D1 stores tasks and events, NVIDIA supplies model inference, and GitHub supplies repositories, commits and pull requests.
+A personal Codex-style cloud coding workspace. The browser communicates only with Firebase Authentication and Firestore. A scheduled Cloudflare Worker processes durable commands, calls NVIDIA and GitHub, and publishes safe task views back to Firestore. D1 retains private agent context, task leases and a durable Firebase outbox.
 
-## Implemented
+## What works
 
-- Password-protected personal workspace with signed HttpOnly sessions, login throttling, origin checks and server-side secrets.
-- Owned-repository and branch selection; Code and read-only Ask modes.
-- Durable queued tasks, background cron execution, per-task leases, cancellation, bounded inference retries, follow-up instructions and activity logs.
-- Repository tree browsing and UTF-8 file reading; staged complete-file edits; atomic commits on isolated branches; pull requests.
-- Credential-free Node 22 command execution on standard GitHub-hosted Actions runners for public repositories; actual command output is fed back to the agent.
-- Sanitized GitHub-flavored Markdown in responses, conversations, and staged `.md` files (with a raw-source view): headings, lists, tables, links, task lists, and code blocks. Parser and sanitizer are bundled locally.
-- Staged file inspection, GitHub checks, task search and status filtering; responsive layouts and keyboard shortcuts.
-- Current NVIDIA-hosted models: GPT OSS 20B (default), Nemotron 3.5 Lightning, DeepSeek V4.1 Flash, GLM 5.3 Flash. GPT OSS and Nemotron tool calling were verified during deployment. A timeout can switch an alternate model to the default, with the change recorded in activity.
+- Firebase email/password sign-in for the dedicated workspace owner. The existing workspace password is unchanged.
+- Repository and branch selection; Code and read-only Ask modes; durable tasks, cancellation, retries, follow-ups, activity, staged file previews and GitHub pull requests.
+- A Thinking panel showing reasoning text supplied by the selected model, plus explicit public progress summaries and tool activity. Some models do not provide reasoning text; that absence is not replaced with fabricated thoughts.
+- NVIDIA SSE streams are consumed server-side. Bounded progress snapshots reach the page through Firestore listeners; the browser never opens a model or Worker stream.
+- Sanitized GitHub-flavored Markdown in responses, conversations and `.md` file previews, with raw-source views.
+- Credential-free Node 22 command execution for public repositories through standard GitHub Actions runners. Real command output returns to the agent and Checks tab.
+- Continued execution after the browser closes. Browser timers and page visibility are not responsible for execution.
 
-## Actual limits
+## Network and data boundary
 
-This is a working personal coding workspace, not a complete reproduction of OpenAI's proprietary Codex infrastructure. It does **not** include an interactive terminal, persistent app preview, a browser agent, OAuth/multi-user tenancy, file deletion, binary edits or workflow-file modifications. Code mode can request up to 3 commands per task, with a 120-second command budget, 1 GB memory, 1 CPU, and a 128-process cap. Commands run in a separate container with no provider credentials, and their output is returned to the agent. The container has outbound networking for dependency installation; its filesystem edits are ephemeral. Public-repository standard GitHub Actions runners are used; private targets are rejected by both the Worker and workflow. Command text and logs are visible to repository readers. The Checks tab displays real command conclusions and checks configured by the target repository. No test pass is assumed. Browserless is reserved as a server-side credential but has no active feature. Firebase and Koyeb are not used and their resources were not changed.
+The frontend bundles Firebase, Marked and DOMPurify; it does not load runtime CDNs. Apart from the initial document, application requests go to:
 
-A scheduled Worker advances active tasks once a minute when the browser is closed. The open task page also requests agent turns. The scheduler awaits each turn independently of browser connections; activity records distinguish cloud-scheduler execution from workspace requests. Interrupted turns recover after their lease expires. Scheduled delivery is eventual; free-tier limits and model outages can delay or stop work. A task has a 24-turn budget, a maximum of 20 staged files and 100 KB per file; context is capped at 260 KB. Up to three tasks are active at once. The workspace caps model calls at 80 per UTC day, including retries. Each instruction allows at most two transient inference retries, and up to five follow-ups can continue a task. This is not a monetary guarantee: keep provider billing disabled and monitor the account's aggregate free quotas. No paid plan is enabled by this project.
+- `identitytoolkit.googleapis.com` and `securetoken.googleapis.com` for Firebase Auth.
+- `firestore.googleapis.com` for commands, cached repository metadata, task state, events and files.
 
-A cancellation prevents the next agent operation; an external GitHub operation already in progress can still finish. Retry preserves state. Review generated code in its PR before merging. Do not put credentials into prompts or repository source. API credentials never enter model messages, browser responses, or Git history.
+The page's Content Security Policy permits only those hosts for connections, excluding same-origin Worker API requests. GitHub links remain ordinary user-initiated navigation. NVIDIA, GitHub, service-account and Browserless credentials never enter frontend code or Firestore views. Koyeb is not used. No Firebase Functions, Cloud Tasks, paid Cloud Scheduler, Blaze upgrade, or paid compute plan is provisioned.
 
-## Development and deployment
+Firestore uses `forgeCloud/forge-cloud-owner-v1/`:
 
-Node 22+. Markdown dependencies are pinned in package-lock.json and bundled into the Worker; the browser needs no CDN.
+- `commands/{id}`: owner-created immutable commands, processed by the backend. Clients cannot set their result or processing state.
+- `views/{id}`: backend-owned configuration, repositories and branch caches.
+- `tasks/{id}` with `events` and `files` subcollections: backend-owned safe task views and model/progress output.
+
+System instructions, tool-response context and full working state remain in D1 and are excluded from Firebase views. `firebase_outbox` coalesces pending view updates and deletes them only after Firestore acknowledges a commit. The supplied Firestore rules preserve the pre-existing Dots app rules while adding this separate owner-only namespace.
+
+## Execution and limits
+
+The Worker cron runs every minute. It processes a small batch of Firebase commands and one eligible task turn per tick. Task leases recover interrupted work after five minutes, and command leases prevent concurrent dispatch. Creation uses the command ID as the task ID so replay cannot duplicate a task. Work continues without a browser connection; a new command or branch lookup can wait until the next scheduler tick.
+
+Limits remain 3 active tasks, 24 turns per instruction, 5 follow-ups, 20 staged files, 100 KB per file, 260 KB context and 80 model calls per UTC day including retries. Transient inference failures receive at most two automatic retries. Large thinking output is bounded, and at most a few intermediate snapshots are published per model call to control free-tier usage.
+
+Commands run in a separate Node 22 container with no provider credentials: up to 3 commands per task, 120 seconds each, 1 GB memory, 1 CPU and 128 processes. Container changes are ephemeral; persistent edits use the file-staging tools. Both runner and backend reject private-repository execution. Command text and logs are visible to readers of the public control repository.
+
+This is not complete proprietary Codex feature parity: persistent app previews, interactive terminals, browser automation, multi-user OAuth, binary edits, file deletion and workflow-file edits are not implemented. Browserless is reserved but inactive. Free quotas apply across the entire Firebase/Cloudflare/provider account; failures stop work rather than enabling a paid plan. Review generated code before merging.
+
+## Development
+
+Node 22+:
 
 ```sh
 npm ci
@@ -31,29 +49,34 @@ npm test
 npm run build
 ```
 
-Use a recent Wrangler CLI for local emulation or redeployment. `wrangler.jsonc` contains only resource identifiers, never credentials. Copy `.env.example` to ignored `.dev.vars` for local development, populate values privately, and initialize D1 using `schema.sql`. For a fresh account create a new database and replace the binding ID.
+`server/firebase-client.js` is bundled into the page. `server/firebase.js` implements the server-only Firebase adapter and durable outbox. `worker.js` owns task execution and the internal command handler. `scripts/build.mjs` bundles the Worker and embeds the page.
 
-```sh
-npx wrangler d1 execute forge-cloud-tasks-20261017 --file schema.sql --remote
-npx wrangler secret put NVIDIA_API_KEY
-npx wrangler secret put GITHUB_TOKEN
-npx wrangler secret put ACCESS_PASSWORD
-npx wrangler secret put BROWSERLESS_TOKEN
-npx wrangler deploy
-```
-
-Configure GitHub `Contents: read/write`, `Pull requests: read/write`, and metadata access for the repositories you want to use. The command runner also requires Actions write/read permission on `Codex-Thing`, whose default branch must contain `.github/workflows/forge-runner.yml`. That workflow is included in this source. Repository Contents access alone is sufficient for tasks that do not execute commands. A repository with no commits must be initialized before tasks can run. Repo and branch listing currently returns the first 100 results.
-
-The initial deployment uses a generated workspace password. Rotate it with `wrangler secret put ACCESS_PASSWORD`; this invalidates all existing sessions. Rotate any provider credentials previously pasted into chat, then update Worker secrets. Do not commit `.dev.vars` or service-account files.
-
-Optional browser Markdown/security regression check (requires Python Playwright and Chromium):
+Optional Markdown browser regression check (Python Playwright and Chromium):
 
 ```sh
 python3 tests/markdown.browser.py
 ```
 
-A live disconnect check submitted a read-only task, closed the submitting client, and observed only D1 records. Two scheduler-driven turns completed it in about 80 seconds; both turns are labeled in task activity. No browser step endpoint was called. Browser regression checks also verified Markdown formatting and removal of script, event-handler, and JavaScript-link payloads.
+Live Firebase authorization checks read the workspace password from a prompt or stdin; they never save it:
 
-## Maintenance
+```sh
+python3 tests/firebase.live.py
+```
 
-D1 tables: `tasks`, `events`, and `usage`. Agent state can contain repository file contents; treat the database as private. History is retained until the owner removes it. Back up D1 before schema changes. Cron runs one bounded turn per active task per tick, and a five-minute lease permits recovery after an interrupted invocation. Model calls are counted before execution, including failed requests.
+## Deployed configuration
+
+- Site: https://forge-codex-cloud.crazyonetwo12345.workers.dev
+- Firebase project: `dots-300de`, existing native Firestore database on its free tier.
+- Dedicated Firebase Auth user: `forge-cloud-owner-v1`, email `forge-owner@dots-300de.firebaseapp.com`.
+- Cloudflare Worker: `forge-codex-cloud`; D1 binding `DB` is configured in `wrangler.jsonc`.
+- Public GitHub command runner: `.github/workflows/forge-runner.yml` on `connorgentile113-png/Codex-Thing`'s default branch.
+
+Required Worker secrets: `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_OWNER_UID`, `NVIDIA_API_KEY`, `GITHUB_TOKEN`, and `ACCESS_PASSWORD` (internal compatibility API signing). `BROWSERLESS_TOKEN` is reserved. `GITHUB_OWNER` is a plain runtime variable. Service-account JSON must never be committed or placed in a client environment variable. The Firebase web API key is a public project identifier; authorization is enforced by Auth and Firestore rules.
+
+Initialize/append D1 schema using `schema.sql`, configure Worker secrets, then deploy with Wrangler. Apply `firestore.rules` through Firebase's supported rules deployment, preserving unrelated existing rules. The dedicated Auth account and existing email/password sign-in were configured using server credentials; Firebase Functions are unnecessary. For a different project or owner, update the public SDK configuration, server project constants, owner UID, and matching rules together.
+
+App login now uses Firebase Auth. Change its password through Firebase Authentication; changing the Worker's compatibility `ACCESS_PASSWORD` does not change Firebase sign-in. Keep a separately stored copy of the runtime service-account key and rotate provider credentials through the Worker secret controls.
+
+## Verification
+
+The deployed frontend was observed contacting only Firebase Auth and Firestore during login, repository reads and task submission. A submitted Firebase command was acknowledged, the browser was closed, and the cloud scheduler completed the task with stored thinking/progress records. Live rules checks verified owner access and rejected anonymous access, cross-workspace reads, view tampering, and step/session/provider command injection. Node tests cover task safety, credential/context exclusion from views, command budgets, packaging and the Firebase value encoding used by task views. Markdown and malicious-HTML checks run in a real browser.

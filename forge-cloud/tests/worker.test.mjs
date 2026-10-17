@@ -32,3 +32,19 @@ test('command logs preserve actual output without runner setup noise',()=>{
  const raw='2026-10-17T00:00:00Z setup noise\n2026-10-17T00:00:00Z ##[endgroup]\n2026-10-17T00:00:00Z 8 tests passed\n2026-10-17T00:00:00Z FORGE_EXIT_CODE=0\n2026-10-17T00:00:00Z upload artifact';
  const clean=cleanCommandOutput(raw);assert.match(clean,/8 tests passed/);assert.match(clean,/FORGE_EXIT_CODE=0/);assert.doesNotMatch(clean,/setup noise|upload artifact/);
 });
+
+test('Firebase task views omit private agent context and preserve public files',async()=>{
+ const {taskViews,fields,values}=await import('../server/firebase.js');
+ const privateState={messages:[{role:'system',content:'PRIVATE_AGENT_CONTEXT'}],files:{'README.md':'# Safe content'},privateKey:'PRIVATE_AGENT_KEY'};
+ const views=await taskViews({FIREBASE_OWNER_UID:'owner'},{id:'task',title:'Public title',state:JSON.stringify(privateState),result:null},privateState);
+ assert.doesNotMatch(JSON.stringify(views),/PRIVATE_AGENT_CONTEXT|PRIVATE_AGENT_KEY|"state"/);
+ assert.equal(views[1].data.content,'# Safe content');
+ const payload={title:'Task',steps:0,error:null,completed:false,files:['README.md'],nested:{count:2},omit:undefined};
+ assert.deepEqual(values(fields(payload)),{title:'Task',steps:0,error:null,completed:false,files:['README.md'],nested:{count:2}});
+});
+
+test('browser connection policy allows Firebase only and excludes backend/provider APIs',async()=>{
+ const response=await worker.fetch(req('/'),env,ctx);
+ const directive=response.headers.get('content-security-policy').split(';').map(s=>s.trim()).find(s=>s.startsWith('connect-src '));
+ assert.deepEqual(directive.split(/\s+/).slice(1),['https://firestore.googleapis.com','https://identitytoolkit.googleapis.com','https://securetoken.googleapis.com']);
+});
