@@ -1,0 +1,83 @@
+name: Forge command runner
+run-name: Forge ${{ inputs.request_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        required: true
+        type: string
+      repository:
+        required: true
+        type: string
+      revision:
+        required: true
+        type: string
+      command:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: forge-${{ inputs.request_id }}
+  cancel-in-progress: false
+jobs:
+  command:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Validate public target
+        env:
+          TARGET_REPO: ${{ inputs.repository }}
+          TARGET_SHA: ${{ inputs.revision }}
+          EXPECTED_OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os,re,json,urllib.request
+          repo=os.environ['TARGET_REPO']
+          if not re.fullmatch(re.escape(os.environ['EXPECTED_OWNER'])+r'/[A-Za-z0-9_.-]+',repo,re.I):
+              raise SystemExit('Invalid owner or repository')
+          if not re.fullmatch(r'[a-f0-9]{40}',os.environ['TARGET_SHA']):
+              raise SystemExit('Expected an immutable commit SHA')
+          request=urllib.request.Request('https://api.github.com/repos/'+repo,headers={'User-Agent':'ForgeRunner'})
+          data=json.load(urllib.request.urlopen(request))
+          if data.get('private',True): raise SystemExit('Only public repositories are supported by this free runner')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+      - name: Prepare sandbox
+        run: |
+          docker pull node:22-bookworm-slim
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+      - name: Run command in isolated container
+        id: execute
+        env:
+          FORGE_COMMAND: ${{ inputs.command }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/forge-result"
+          set +e
+          timeout -k 10s 120s docker run --rm --name "forge-$GITHUB_RUN_ID" \
+            --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 128 --memory 1g --cpus 1 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
+            --tmpfs /tmp:rw,nosuid,size=256m --workdir /workspace \
+            --env HOME=/tmp --env FORGE_COMMAND \
+            node:22-bookworm-slim sh -c 'eval "$FORGE_COMMAND"' \
+            > "$RUNNER_TEMP/forge-result/output.txt" 2>&1
+          code=$?
+          docker rm -f "forge-$GITHUB_RUN_ID" >/dev/null 2>&1 || true
+          printf '\nFORGE_EXIT_CODE=%s\n' "$code" >> "$RUNNER_TEMP/forge-result/output.txt"
+          tail -c 40000 "$RUNNER_TEMP/forge-result/output.txt"
+          exit "$code"
+      - name: Upload command output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-command-output
+          path: ${{ runner.temp }}/forge-result/output.txt
+          retention-days: 3
