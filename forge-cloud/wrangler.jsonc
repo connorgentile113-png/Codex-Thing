@@ -1,0 +1,10 @@
+{
+  "name": "forge-codex-cloud",
+  "main": "dist/worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "build": {"command": "npm run build"},
+  "vars": {"GITHUB_OWNER": "connorgentile113-png"},
+  "d1_databases": [{"binding":"DB","database_name":"forge-cloud-tasks-20261017","database_id":"2965e28f-d420-4dc2-b9e2-a8fd4c1795c6"}],
+  "triggers": {"crons":["* * * * *"]}
+}

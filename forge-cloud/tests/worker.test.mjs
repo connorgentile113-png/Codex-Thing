@@ -1,0 +1,50 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import worker,{validRepo,validPath,agentTool,cleanCommandOutput} from '../worker.js';
+const secret='test-only-password';
+const env={ACCESS_PASSWORD:secret,GITHUB_OWNER:'tester',GITHUB_TOKEN:'dummy',NVIDIA_API_KEY:'dummy',DB:{prepare(){return {bind(){return this;},async first(){return {count:1};}}}}};
+const ctx={waitUntil(){}};
+function req(path,method='GET',body,cookie,origin='https://forge.test'){return new Request('https://forge.test'+path,{method,headers:{Origin:origin,...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});}
+test('public health route does not expose configuration',async()=>{const r=await worker.fetch(req('/api/health'),env,ctx);assert.equal(r.status,200);assert.deepEqual(await r.json(),{ok:true,app:'Forge Cloud',version:'1.0.0'});});
+test('protected endpoints reject anonymous visitors',async()=>{for(const p of ['/api/tasks','/api/config','/api/repos'])assert.equal((await worker.fetch(req(p),env,ctx)).status,401);});
+test('login cookies are secure, signed and enforce same origin writes',async()=>{assert.equal((await worker.fetch(req('/api/session','POST',{password:'wrong'}),env,ctx)).status,401);const login=await worker.fetch(req('/api/session','POST',{password:secret}),env,ctx);const cookie=login.headers.get('set-cookie');assert.match(cookie,/HttpOnly; Secure; SameSite=Strict/);const auth=cookie.split(';')[0];assert.equal((await worker.fetch(req('/api/config','GET',undefined,auth),env,ctx)).status,200);assert.equal((await worker.fetch(req('/api/tasks','POST',{},auth,'https://attacker.test'),env,ctx)).status,403);assert.equal((await worker.fetch(req('/api/config','GET',undefined,auth+'x'),env,ctx)).status,401);});
+test('repository restriction prevents cross-account operations',()=>{assert.equal(validRepo('tester/repo','tester'),true);for(const r of ['other/repo','tester/repo/../../other','tester/repo?ref=evil','tester/'])assert.equal(validRepo(r,'tester'),false);});
+test('file paths reject traversal and credential files',()=>{for(const p of ['../foo','a/../b','/absolute','a/.git/config','.env','.env.production','credentials.json','service-account-prod.json','a//b'])assert.equal(validPath(p),false,p);for(const p of ['src/main.ts','README.md','package.json'])assert.equal(validPath(p),true,p);});
+test('Ask mode and workflow modifications cannot write',async()=>{await assert.rejects(agentTool(env,{mode:'ask'},{files:{}},'write_file',{path:'README.md',content:'bad'}),/Ask mode/);await assert.rejects(agentTool(env,{mode:'code'},{files:{}},'write_file',{path:'.github/workflows/build.yml',content:'bad'}),/workflow/);});
+test('file size and file count limits enforced server side',async()=>{await assert.rejects(agentTool(env,{mode:'code'},{files:{}},'write_file',{path:'big.txt',content:'x'.repeat(100001)}),/100 KB/);const files=Object.fromEntries(Array.from({length:20},(_,i)=>['file'+i,'text']));await assert.rejects(agentTool(env,{mode:'code'},{files},'write_file',{path:'more.txt',content:'text'}),/20-file/);});
+test('homepage includes restrictive security headers',async()=>{const r=await worker.fetch(req('/'),env,ctx);assert.equal(r.headers.get('x-frame-options'),'DENY');assert.match(r.headers.get('content-security-policy'),/frame-ancestors 'none'/);});
+
+test('production packaging preserves every UI byte including dollar selectors',async()=>{
+ const {execFileSync}=await import('node:child_process');const {readFileSync}=await import('node:fs');
+ execFileSync(process.execPath,['scripts/build.mjs']);
+ const built=await import('../dist/worker.js?test='+Date.now());
+ const response=await built.default.fetch(req('/'),env,ctx);
+ const {composeHTML}=await import('../scripts/ui.mjs');
+ assert.equal(await response.text(),composeHTML());
+});
+test('command execution is unavailable in Ask mode and enforces budgets',async()=>{
+ await assert.rejects(agentTool(env,{mode:'ask'},{files:{}},'run_command',{command:'node --version'}),/Code mode/);
+ await assert.rejects(agentTool(env,{mode:'code'},{files:{},commands:3},'run_command',{command:'node --version'}),/Three-command/);
+ await assert.rejects(agentTool(env,{mode:'code'},{files:{},pendingRun:{}},'run_command',{command:'node --version'}),/already in progress/);
+});
+
+test('command logs preserve actual output without runner setup noise',()=>{
+ const raw='2026-10-17T00:00:00Z setup noise\n2026-10-17T00:00:00Z ##[endgroup]\n2026-10-17T00:00:00Z 8 tests passed\n2026-10-17T00:00:00Z FORGE_EXIT_CODE=0\n2026-10-17T00:00:00Z upload artifact';
+ const clean=cleanCommandOutput(raw);assert.match(clean,/8 tests passed/);assert.match(clean,/FORGE_EXIT_CODE=0/);assert.doesNotMatch(clean,/setup noise|upload artifact/);
+});
+
+test('Firebase task views omit private agent context and preserve public files',async()=>{
+ const {taskViews,fields,values}=await import('../server/firebase.js');
+ const privateState={messages:[{role:'system',content:'PRIVATE_AGENT_CONTEXT'}],files:{'README.md':'# Safe content'},privateKey:'PRIVATE_AGENT_KEY'};
+ const views=await taskViews({FIREBASE_OWNER_UID:'owner'},{id:'task',title:'Public title',state:JSON.stringify(privateState),result:null},privateState);
+ assert.doesNotMatch(JSON.stringify(views),/PRIVATE_AGENT_CONTEXT|PRIVATE_AGENT_KEY|"state"/);
+ assert.equal(views[1].data.content,'# Safe content');
+ const payload={title:'Task',steps:0,error:null,completed:false,files:['README.md'],nested:{count:2},omit:undefined};
+ assert.deepEqual(values(fields(payload)),{title:'Task',steps:0,error:null,completed:false,files:['README.md'],nested:{count:2}});
+});
+
+test('browser connection policy allows Firebase only and excludes backend/provider APIs',async()=>{
+ const response=await worker.fetch(req('/'),env,ctx);
+ const directive=response.headers.get('content-security-policy').split(';').map(s=>s.trim()).find(s=>s.startsWith('connect-src '));
+ assert.deepEqual(directive.split(/\s+/).slice(1),['https://firestore.googleapis.com','https://identitytoolkit.googleapis.com','https://securetoken.googleapis.com']);
+});
