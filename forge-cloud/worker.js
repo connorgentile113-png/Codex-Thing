@@ -87,7 +87,7 @@ async function publishChanges(env,task,state){
  await snapshot(env,task,state);
  const branch='forge/'+task.id;
  const existing=await gh(env,'/repos/'+task.repo+'/pulls?state=all&head='+encodeURIComponent(env.GITHUB_OWNER+':'+branch));
- if(existing.length)return existing[0].html_url;
+ const open=existing.find(pr=>pr.state==='open');if(open)return open.html_url;
  const pr=await gh(env,'/repos/'+task.repo+'/pulls','POST',{title:state.title,head:branch,base:task.branch,body:state.summary+'\n\n---\nCreated by Forge Cloud. Review generated code before merging. Verification details are recorded in the task activity.'});
  return pr.html_url;
 }
@@ -228,7 +228,7 @@ async function api(req,env,ctx,url){
   }
   if(action==='files')return json(JSON.parse(task.state).files||{});
   if(action==='checks'){
-   const s=JSON.parse(task.state);const commandChecks=(s.commandResults||[]).map(c=>({name:c.command,status:'completed',conclusion:c.conclusion,url:c.url}));if(!s.commitSha)return json({checks:commandChecks,message:'No verification runs yet. Ask the agent to run a command in Code mode.'});
+   const s=JSON.parse(task.state);const commandChecks=(s.commandResults||[]).map(c=>({name:c.command,status:'completed',conclusion:c.conclusion,url:c.url}));if(!s.commitSha)return json({checks:commandChecks,message:commandChecks.length?'Verification runs are listed below.':'No verification runs yet. Ask the agent to run a command in Code mode.'});
    const checks=await gh(env,'/repos/'+task.repo+'/commits/'+s.commitSha+'/check-runs');return json({checks:[...commandChecks,...checks.check_runs.map(c=>({name:c.name,status:c.status,conclusion:c.conclusion,url:c.html_url}))]});
   }
   if(!action&&req.method==='GET'){const events=(await env.DB.prepare('SELECT id,kind,message,created_at FROM events WHERE task_id=? ORDER BY id').bind(id).all()).results;const {state,...safe}=task;return json({...safe,files:Object.keys(JSON.parse(state).files||{}),events,commandResults:JSON.parse(state).commandResults||[],pendingCommand:JSON.parse(state).pendingRun?.command||null});}
