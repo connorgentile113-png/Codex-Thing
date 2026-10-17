@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import worker,{validRepo,validPath,agentTool} from '../worker.js';
+import worker,{validRepo,validPath,agentTool,cleanCommandOutput} from '../worker.js';
 const secret='test-only-password';
 const env={ACCESS_PASSWORD:secret,GITHUB_OWNER:'tester',GITHUB_TOKEN:'dummy',NVIDIA_API_KEY:'dummy',DB:{prepare(){return {bind(){return this;},async first(){return {count:1};}}}}};
 const ctx={waitUntil(){}};
@@ -25,4 +25,9 @@ test('command execution is unavailable in Ask mode and enforces budgets',async()
  await assert.rejects(agentTool(env,{mode:'ask'},{files:{}},'run_command',{command:'node --version'}),/Code mode/);
  await assert.rejects(agentTool(env,{mode:'code'},{files:{},commands:3},'run_command',{command:'node --version'}),/Three-command/);
  await assert.rejects(agentTool(env,{mode:'code'},{files:{},pendingRun:{}},'run_command',{command:'node --version'}),/already in progress/);
+});
+
+test('command logs preserve actual output without runner setup noise',()=>{
+ const raw='2026-10-17T00:00:00Z setup noise\n2026-10-17T00:00:00Z ##[endgroup]\n2026-10-17T00:00:00Z 8 tests passed\n2026-10-17T00:00:00Z FORGE_EXIT_CODE=0\n2026-10-17T00:00:00Z upload artifact';
+ const clean=cleanCommandOutput(raw);assert.match(clean,/8 tests passed/);assert.match(clean,/FORGE_EXIT_CODE=0/);assert.doesNotMatch(clean,/setup noise|upload artifact/);
 });

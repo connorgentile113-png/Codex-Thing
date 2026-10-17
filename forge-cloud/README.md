@@ -6,11 +6,11 @@ An independent, self-hosted Codex-style coding workspace. Cloudflare Workers run
 
 - Password-protected personal workspace with signed HttpOnly sessions, login throttling, origin checks and server-side secrets.
 - Owned-repository and branch selection; Code and read-only Ask modes.
-- Durable queued tasks, background cron execution, per-task leases, cancellation, retries and activity logs.
+- Durable queued tasks, background cron execution, per-task leases, cancellation, bounded inference retries, follow-up instructions and activity logs.
 - Repository tree browsing and UTF-8 file reading; staged complete-file edits; atomic commits on isolated branches; pull requests.
 - Credential-free Node 22 command execution on standard GitHub-hosted Actions runners for public repositories; actual command output is fed back to the agent.
 - Staged file inspection, GitHub checks, task search and status filtering; responsive layouts and keyboard shortcuts.
-- Current NVIDIA models: Nemotron 3.5 Lightning, DeepSeek V4.1 Flash, GLM 5.3 Flash. Nemotron tool calling was verified during deployment.
+- Current NVIDIA-hosted models: GPT OSS 20B (default), Nemotron 3.5 Lightning, DeepSeek V4.1 Flash, GLM 5.3 Flash. GPT OSS and Nemotron tool calling were verified during deployment. A timeout can switch an alternate model to the default, with the change recorded in activity.
 
 ## Actual limits
 
@@ -46,4 +46,4 @@ The initial deployment uses a generated workspace password. Rotate it with `wran
 
 ## Maintenance
 
-D1 tables: `tasks`, `events`, and `usage`. Agent state can contain repository file contents; treat the database as private. History is retained until the owner removes it. Back up D1 before schema changes. Cron runs one bounded turn per active task per tick, and a three-minute lease permits recovery after an interrupted invocation. Model calls are counted before execution, including failed requests.
+D1 tables: `tasks`, `events`, and `usage`. Agent state can contain repository file contents; treat the database as private. History is retained until the owner removes it. Back up D1 before schema changes. Cron runs one bounded turn per active task per tick, and a five-minute lease permits recovery after an interrupted invocation. Model calls are counted before execution, including failed requests.

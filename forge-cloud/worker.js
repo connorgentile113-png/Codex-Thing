@@ -1,7 +1,7 @@
 const HTML = "__HTML__";
 const MAX_STEPS=24;
 const CONTROL_REPO='connorgentile113-png/Codex-Thing';
-const MODELS=['nvidia/nemotron-3.5-lightning-30b-a3b','deepseek-ai/deepseek-v4.1-flash','z-ai/glm-5.3-flash'];
+const MODELS=['openai/gpt-oss-20b','nvidia/nemotron-3.5-lightning-30b-a3b','deepseek-ai/deepseek-v4.1-flash','z-ai/glm-5.3-flash'];
 const json=(v,status=200)=>new Response(JSON.stringify(v),{status,headers:{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const now=()=>new Date().toISOString();
 const enc=new TextEncoder();
@@ -91,6 +91,13 @@ async function publishChanges(env,task,state){
  const pr=await gh(env,'/repos/'+task.repo+'/pulls','POST',{title:state.title,head:branch,base:task.branch,body:state.summary+'\n\n---\nCreated by Forge Cloud. Review generated code before merging. Verification details are recorded in the task activity.'});
  return pr.html_url;
 }
+export function cleanCommandOutput(raw){
+ const clean=raw.replace(/\x1b\[[0-9;]*m/g,'').split('\n').map(line=>line.replace(/^\d{4}-\d{2}-\d{2}T[^ ]+ /,'')).join('\n');
+ const end=clean.lastIndexOf('FORGE_EXIT_CODE=');
+ if(end<0)return clean.slice(-12000);
+ const before=clean.slice(0,end);const marker=before.lastIndexOf('##[endgroup]');
+ return clean.slice(marker>=0?marker+'##[endgroup]'.length:Math.max(0,end-12000),clean.indexOf('\n',end)+1||undefined).slice(-16000);
+}
 async function commandResult(env,task,state){
  const pending=state.pendingRun;
  const runs=await gh(env,'/repos/'+CONTROL_REPO+'/actions/workflows/forge-runner.yml/runs?event=workflow_dispatch&per_page=50');
@@ -108,7 +115,7 @@ async function commandResult(env,task,state){
    const log=await fetch(location);output+=(await log.text()).slice(-42000);
   }else if(response.ok)output+=(await response.text()).slice(-42000);
  }
- const result='Command: '+pending.command+'\nConclusion: '+run.conclusion+'\nRun: '+run.html_url+'\n'+output.slice(-40000);
+ const result='Command: '+pending.command+'\nConclusion: '+run.conclusion+'\nRun: '+run.html_url+'\n'+cleanCommandOutput(output);
  const toolMessage=state.messages.find(m=>m.role==='tool'&&m.tool_call_id===pending.toolCallId);
  if(toolMessage)toolMessage.content=result;else state.messages.push({role:'user',content:'Command execution result:\n'+result});
  state.commandResults=state.commandResults||[];state.commandResults.push({command:pending.command,conclusion:run.conclusion,url:run.html_url});delete state.pendingRun;
@@ -118,12 +125,12 @@ async function ai(env,task,messages){
  const day=new Date().toISOString().slice(0,10);
  const quota=await env.DB.prepare("INSERT INTO usage(key,count) VALUES(?,1) ON CONFLICT(key) DO UPDATE SET count=count+1 WHERE count<80 RETURNING count").bind('model:'+day).first();
  if(!quota)throw new Error('Daily limit of 80 model requests reached. Try again tomorrow (UTC).');
- const res=await fetch('https://integrate.api.nvidia.com/v1/chat/completions',{method:'POST',headers:{Authorization:'Bearer '+env.NVIDIA_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({model:task.model,messages,tools,tool_choice:'auto',temperature:0.2,max_tokens:5000,stream:false,chat_template_kwargs:{enable_thinking:false}}),signal:AbortSignal.timeout(75000)});
+ const res=await fetch('https://integrate.api.nvidia.com/v1/chat/completions',{method:'POST',headers:{Authorization:'Bearer '+env.NVIDIA_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({model:task.model,messages,tools,tool_choice:'auto',temperature:0.2,max_tokens:3000,stream:false,...(task.model==='openai/gpt-oss-20b'?{reasoning_effort:'low'}:{}),chat_template_kwargs:{enable_thinking:false}}),signal:AbortSignal.timeout(180000)});
  if(!res.ok){const data=await res.json().catch(()=>({}));throw new Error('NVIDIA '+res.status+': '+(data.error?.message||data.detail||'model request failed'));}
  const result=await res.json();const choice=result.choices?.[0];if(!choice?.message)throw new Error('Model returned no message');if(choice.finish_reason==='length')throw new Error('Model response exceeded output limit. Retry with a smaller task.');return choice.message;
 }
 export async function step(env,id){
- const lease=await env.DB.prepare("UPDATE tasks SET lease_until=?,status='running',updated_at=? WHERE id=? AND status IN ('queued','running') AND lease_until<?").bind(Date.now()+180000,now(),id,Date.now()).run();
+ const lease=await env.DB.prepare("UPDATE tasks SET lease_until=?,status='running',updated_at=? WHERE id=? AND status IN ('queued','running') AND lease_until<?").bind(Date.now()+300000,now(),id,Date.now()).run();
  if(!lease.meta.changes)return;
  const task=await getTask(env,id);let state=JSON.parse(task.state);
  try{
@@ -136,7 +143,8 @@ export async function step(env,id){
   }
   if(!state.ready){
    await event(env,id,'status','Thinking · turn '+(task.steps+1));
-   const message=await ai(env,task,state.messages);state.messages.push({role:'assistant',content:message.content||null,...(message.tool_calls?{tool_calls:message.tool_calls}:{})});task.steps++;
+   for(const m of state.messages){if(m.role==='tool'&&m.content?.startsWith('Command:')&&m.content.length>16000)m.content=m.content.split('\n').slice(0,3).join('\n')+'\n'+cleanCommandOutput(m.content);}
+   const message=await ai(env,{...task,model:state.effectiveModel||task.model},state.messages);state.messages.push({role:'assistant',content:message.content||null,...(message.tool_calls?{tool_calls:message.tool_calls}:{})});task.steps++;
    if(message.content)await event(env,id,'assistant',message.content);
    if(message.tool_calls?.length>8)throw new Error('Model requested too many tool calls in a single turn. Retry the task.');
    if(message.tool_calls?.length){
@@ -157,6 +165,12 @@ export async function step(env,id){
    await event(env,id,'status',pr?'Pull request opened: '+pr:'Task completed');
   }
  }catch(e){
+  const transient=/timeout|aborted|NVIDIA (429|500|502|503|504)/i.test(String(e.message));
+  if(transient&&(state.inferenceRetries||0)<2){
+   state.inferenceRetries=(state.inferenceRetries||0)+1;
+   if(!state.effectiveModel&&task.model!=='openai/gpt-oss-20b'){state.effectiveModel='openai/gpt-oss-20b';await event(env,id,'status','Switching to GPT OSS 20B after provider timeout.');}
+   await stateSave(env,task,state);await event(env,id,'status','Inference delayed; retry '+state.inferenceRetries+' of 2 on the next turn.');return;
+  }
   await stateSave(env,task,state);await env.DB.prepare("UPDATE tasks SET status='failed',error=?,updated_at=? WHERE id=? AND status!='cancelled'").bind(String(e.message).slice(0,2000),now(),id).run();await event(env,id,'error',e.message);
  }finally{await env.DB.prepare('UPDATE tasks SET lease_until=0 WHERE id=?').bind(id).run();}
 }
@@ -191,9 +205,17 @@ async function api(req,env,ctx,url){
  const match=path.match(/^\/api\/tasks\/([a-f0-9-]+)(?:\/(step|cancel|retry|files|checks|followup))?$/);
  if(match){
   const [,id,action]=match;const task=await getTask(env,id);if(!task)return json({error:'Task not found'},404);
-  if(action==='step'&&req.method==='POST'){await step(env,id);return json({ok:true});}
+  if(action==='step'&&req.method==='POST'){
+   // Whitespace keeps long inference requests alive while remaining valid JSON.
+   let closed=false,pulse;const stream=new ReadableStream({start(controller){
+    pulse=setInterval(()=>{if(!closed)controller.enqueue(enc.encode(' '));},10000);
+    const work=step(env,id).then(()=>{if(!closed)controller.enqueue(enc.encode('{"ok":true}'));}).catch(()=>{if(!closed)controller.enqueue(enc.encode('{"error":"Task turn interrupted; check activity."}'));}).finally(()=>{clearInterval(pulse);if(!closed){closed=true;controller.close();}});
+    ctx.waitUntil(work);
+   },cancel(){closed=true;clearInterval(pulse);}});
+   return new Response(stream,{headers:{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
+  }
   if(action==='cancel'&&req.method==='POST'){await env.DB.prepare("UPDATE tasks SET status='cancelled',updated_at=? WHERE id=? AND status IN ('queued','running')").bind(now(),id).run();await event(env,id,'status','Cancellation requested');return json({ok:true});}
-  if(action==='retry'&&req.method==='POST'){await env.DB.prepare("UPDATE tasks SET status='queued',error=NULL,lease_until=0,updated_at=? WHERE id=? AND status='failed'").bind(now(),id).run();await step(env,id);return json({ok:true});}
+  if(action==='retry'&&req.method==='POST'){await env.DB.prepare("UPDATE tasks SET status='queued',error=NULL,lease_until=0,updated_at=? WHERE id=? AND status='failed'").bind(now(),id).run();return json({ok:true});}
   if(action==='followup'&&req.method==='POST'){
    if(!['completed','failed','cancelled'].includes(task.status))return json({error:'Wait for the current task to finish before sending a follow-up.'},409);
    const body=await req.json();if(typeof body.prompt!=='string'||!body.prompt.trim()||body.prompt.length>16000)return json({error:'Follow-up must contain 1–16,000 characters.'},400);
