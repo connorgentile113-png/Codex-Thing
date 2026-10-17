@@ -188,12 +188,22 @@ async function api(req,env,ctx,url){
   const active=await env.DB.prepare("SELECT count(*) AS count FROM tasks WHERE status IN ('queued','running')").first();if(active.count>=3)return json({error:'Three tasks are already active. Wait or cancel one.'},429);
   const id=crypto.randomUUID();await env.DB.prepare('INSERT INTO tasks(id,title,prompt,repo,branch,mode,model,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id,body.prompt.trim().split('\n')[0].slice(0,120),body.prompt.trim(),body.repo,body.branch,body.mode,body.model,'queued',now(),now()).run();await event(env,id,'status','Task queued · '+body.mode+' mode');return json({id},201);
  }
- const match=path.match(/^\/api\/tasks\/([a-f0-9-]+)(?:\/(step|cancel|retry|files|checks))?$/);
+ const match=path.match(/^\/api\/tasks\/([a-f0-9-]+)(?:\/(step|cancel|retry|files|checks|followup))?$/);
  if(match){
   const [,id,action]=match;const task=await getTask(env,id);if(!task)return json({error:'Task not found'},404);
   if(action==='step'&&req.method==='POST'){await step(env,id);return json({ok:true});}
   if(action==='cancel'&&req.method==='POST'){await env.DB.prepare("UPDATE tasks SET status='cancelled',updated_at=? WHERE id=? AND status IN ('queued','running')").bind(now(),id).run();await event(env,id,'status','Cancellation requested');return json({ok:true});}
   if(action==='retry'&&req.method==='POST'){await env.DB.prepare("UPDATE tasks SET status='queued',error=NULL,lease_until=0,updated_at=? WHERE id=? AND status='failed'").bind(now(),id).run();await step(env,id);return json({ok:true});}
+  if(action==='followup'&&req.method==='POST'){
+   if(!['completed','failed','cancelled'].includes(task.status))return json({error:'Wait for the current task to finish before sending a follow-up.'},409);
+   const body=await req.json();if(typeof body.prompt!=='string'||!body.prompt.trim()||body.prompt.length>16000)return json({error:'Follow-up must contain 1–16,000 characters.'},400);
+   const s=JSON.parse(task.state);if(!s.messages)return json({error:'Create a new task; this task never started.'},400);
+   if(s.pendingRun)return json({error:'A command may still be running. Check GitHub Actions before continuing.'},409);
+   const active=await env.DB.prepare("SELECT count(*) AS count FROM tasks WHERE status IN ('queued','running')").first();if(active.count>=3)return json({error:'Three tasks are already active.'},429);
+   if((s.followups||0)>=5)return json({error:'Five follow-ups reached. Create a new task.'},400);
+   s.followups=(s.followups||0)+1;s.ready=false;delete s.summary;s.messages.push({role:'user',content:body.prompt.trim()});
+   await env.DB.prepare("UPDATE tasks SET state=?,status='queued',result=NULL,error=NULL,steps=0,lease_until=0,updated_at=? WHERE id=?").bind(JSON.stringify(s),now(),id).run();await event(env,id,'user',body.prompt.trim());return json({ok:true});
+  }
   if(action==='files')return json(JSON.parse(task.state).files||{});
   if(action==='checks'){
    const s=JSON.parse(task.state);const commandChecks=(s.commandResults||[]).map(c=>({name:c.command,status:'completed',conclusion:c.conclusion,url:c.url}));if(!s.commitSha)return json({checks:commandChecks,message:'No verification runs yet. Ask the agent to run a command in Code mode.'});

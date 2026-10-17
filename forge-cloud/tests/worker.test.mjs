@@ -13,3 +13,16 @@ test('file paths reject traversal and credential files',()=>{for(const p of ['..
 test('Ask mode and workflow modifications cannot write',async()=>{await assert.rejects(agentTool(env,{mode:'ask'},{files:{}},'write_file',{path:'README.md',content:'bad'}),/Ask mode/);await assert.rejects(agentTool(env,{mode:'code'},{files:{}},'write_file',{path:'.github/workflows/build.yml',content:'bad'}),/workflow/);});
 test('file size and file count limits enforced server side',async()=>{await assert.rejects(agentTool(env,{mode:'code'},{files:{}},'write_file',{path:'big.txt',content:'x'.repeat(100001)}),/100 KB/);const files=Object.fromEntries(Array.from({length:20},(_,i)=>['file'+i,'text']));await assert.rejects(agentTool(env,{mode:'code'},{files},'write_file',{path:'more.txt',content:'text'}),/20-file/);});
 test('homepage includes restrictive security headers',async()=>{const r=await worker.fetch(req('/'),env,ctx);assert.equal(r.headers.get('x-frame-options'),'DENY');assert.match(r.headers.get('content-security-policy'),/frame-ancestors 'none'/);});
+
+test('production packaging preserves every UI byte including dollar selectors',async()=>{
+ const {execFileSync}=await import('node:child_process');const {readFileSync}=await import('node:fs');
+ execFileSync(process.execPath,['scripts/build.mjs']);
+ const built=await import('../dist/worker.js?test='+Date.now());
+ const response=await built.default.fetch(req('/'),env,ctx);
+ assert.equal(await response.text(),readFileSync('public/index.html','utf8'));
+});
+test('command execution is unavailable in Ask mode and enforces budgets',async()=>{
+ await assert.rejects(agentTool(env,{mode:'ask'},{files:{}},'run_command',{command:'node --version'}),/Code mode/);
+ await assert.rejects(agentTool(env,{mode:'code'},{files:{},commands:3},'run_command',{command:'node --version'}),/Three-command/);
+ await assert.rejects(agentTool(env,{mode:'code'},{files:{},pendingRun:{}},'run_command',{command:'node --version'}),/already in progress/);
+});
