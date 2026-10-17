@@ -129,11 +129,12 @@ async function ai(env,task,messages){
  if(!res.ok){const data=await res.json().catch(()=>({}));throw new Error('NVIDIA '+res.status+': '+(data.error?.message||data.detail||'model request failed'));}
  const result=await res.json();const choice=result.choices?.[0];if(!choice?.message)throw new Error('Model returned no message');if(choice.finish_reason==='length')throw new Error('Model response exceeded output limit. Retry with a smaller task.');return choice.message;
 }
-export async function step(env,id){
+export async function step(env,id,source='workspace'){
  const lease=await env.DB.prepare("UPDATE tasks SET lease_until=?,status='running',updated_at=? WHERE id=? AND status IN ('queued','running') AND lease_until<?").bind(Date.now()+300000,now(),id,Date.now()).run();
  if(!lease.meta.changes)return;
  const task=await getTask(env,id);let state=JSON.parse(task.state);
  try{
+  await event(env,id,'status',source==='scheduler'?'Execution started by cloud scheduler.':'Execution started by workspace.');
   if(state.pendingRun&&!await commandResult(env,task,state)){await stateSave(env,task,state);return;}
   if(task.steps>=MAX_STEPS)throw new Error('Task reached its 24-turn limit. Narrow the request and create another task. Staged files remain available.');
   if(!state.messages){
@@ -247,6 +248,6 @@ export default {
  },
  async scheduled(event,env,ctx){
   const tasks=(await env.DB.prepare("SELECT id FROM tasks WHERE status IN ('queued','running') AND lease_until<? ORDER BY created_at LIMIT 3").bind(Date.now()).all()).results;
-  ctx.waitUntil(Promise.all(tasks.map(t=>step(env,t.id))));
+  await Promise.all(tasks.map(t=>step(env,t.id,'scheduler')));
  }
 };

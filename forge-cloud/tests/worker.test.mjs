@@ -19,7 +19,8 @@ test('production packaging preserves every UI byte including dollar selectors',a
  execFileSync(process.execPath,['scripts/build.mjs']);
  const built=await import('../dist/worker.js?test='+Date.now());
  const response=await built.default.fetch(req('/'),env,ctx);
- assert.equal(await response.text(),readFileSync('public/index.html','utf8'));
+ const {composeHTML}=await import('../scripts/ui.mjs');
+ assert.equal(await response.text(),composeHTML());
 });
 test('command execution is unavailable in Ask mode and enforces budgets',async()=>{
  await assert.rejects(agentTool(env,{mode:'ask'},{files:{}},'run_command',{command:'node --version'}),/Code mode/);
