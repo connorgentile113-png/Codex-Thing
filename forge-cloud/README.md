@@ -8,12 +8,13 @@ An independent, self-hosted Codex-style coding workspace. Cloudflare Workers run
 - Owned-repository and branch selection; Code and read-only Ask modes.
 - Durable queued tasks, background cron execution, per-task leases, cancellation, retries and activity logs.
 - Repository tree browsing and UTF-8 file reading; staged complete-file edits; atomic commits on isolated branches; pull requests.
+- Credential-free Node 22 command execution on standard GitHub-hosted Actions runners for public repositories; actual command output is fed back to the agent.
 - Staged file inspection, GitHub checks, task search and status filtering; responsive layouts and keyboard shortcuts.
 - Current NVIDIA models: Nemotron 3.5 Lightning, DeepSeek V4.1 Flash, GLM 5.3 Flash. Nemotron tool calling was verified during deployment.
 
 ## Actual limits
 
-This is a working personal coding workspace, not a complete reproduction of OpenAI's proprietary Codex infrastructure. It does **not** include shell execution, an interactive terminal, live app preview, a browser agent, automatic test execution, OAuth/multi-user tenancy, file deletion, binary edits or workflow-file modifications. The Checks tab reads checks configured by the target repository. It does not manufacture test results. Browserless is reserved as a server-side credential but has no active feature. Firebase and Koyeb are not used and their resources were not changed.
+This is a working personal coding workspace, not a complete reproduction of OpenAI's proprietary Codex infrastructure. It does **not** include an interactive terminal, persistent app preview, a browser agent, OAuth/multi-user tenancy, file deletion, binary edits or workflow-file modifications. Code mode can request up to 3 commands per task, with a 120-second command budget, 1 GB memory, 1 CPU, and a 128-process cap. Commands run in a separate container with no provider credentials, and their output is returned to the agent. The container has outbound networking for dependency installation; its filesystem edits are ephemeral. Public-repository standard GitHub Actions runners are used; private targets are rejected by both the Worker and workflow. Command text and logs are visible to repository readers. The Checks tab displays real command conclusions and checks configured by the target repository. No test pass is assumed. Browserless is reserved as a server-side credential but has no active feature. Firebase and Koyeb are not used and their resources were not changed.
 
 A scheduled Worker advances active tasks once a minute when the browser is closed. The open task page also requests agent turns. Scheduled delivery is eventual; free-tier limits and model outages can delay or stop work. A task has a 24-turn budget, a maximum of 20 staged files and 100 KB per file; context is capped at 260 KB. Up to three tasks are active at once. The workspace caps model calls at 80 per UTC day. This is not a monetary guarantee: keep provider billing disabled and monitor the account's aggregate free quotas. No paid plan is enabled by this project.
 
@@ -39,7 +40,7 @@ npx wrangler secret put BROWSERLESS_TOKEN
 npx wrangler deploy
 ```
 
-Configure GitHub `Contents: read/write`, `Pull requests: read/write`, and metadata access for the repositories you want to use. Workflow permissions are unnecessary for this version. A repository with no commits must be initialized before tasks can run. Repo and branch listing currently returns the first 100 results.
+Configure GitHub `Contents: read/write`, `Pull requests: read/write`, and metadata access for the repositories you want to use. The command runner also requires Actions write/read permission on `Codex-Thing`, whose default branch must contain `.github/workflows/forge-runner.yml`. That workflow is included in this source. Repository Contents access alone is sufficient for tasks that do not execute commands. A repository with no commits must be initialized before tasks can run. Repo and branch listing currently returns the first 100 results.
 
 The initial deployment uses a generated workspace password. Rotate it with `wrangler secret put ACCESS_PASSWORD`; this invalidates all existing sessions. Rotate any provider credentials previously pasted into chat, then update Worker secrets. Do not commit `.dev.vars` or service-account files.
 
